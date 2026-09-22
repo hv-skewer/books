@@ -186,7 +186,7 @@ footer b{color:var(--ink2)}
         <button data-v="grid" class="on">封面</button>
         <button data-v="list">清单</button>
       </div>
-      <button class="ghost" id="btnAdmin">管理</button>
+      <button class="ghost" id="btnAdmin" style="display:none">管理</button>
     </div>
     <div class="chips" id="chips"></div>
   </div>
@@ -195,9 +195,9 @@ footer b{color:var(--ink2)}
 <main class="wrap">
   <div id="admin">
     <h4>管理（只对你自己可见，设置存在本机浏览器）</h4>
-    <p class="hint">标记「已售出」默认存在这台电脑的浏览器里，免费、即时。<br>如果你希望改动同时写进 GitHub 仓库（这样别人打开链接也能看到），把下面三项填上即可。</p>
-    <div class="frow"><label>联系人</label><input id="fName" type="text" placeholder="例如：Caspiran"><label>联系方式</label><input id="fContact" type="text" placeholder="例如：微信 xxx / 手机 138…"></div>
-    <div class="frow"><label>GitHub</label><input id="fRepo" type="text" placeholder="用户名/仓库名，例如 caspiran/books"><input id="fBranch" type="text" placeholder="分支，默认 main" style="flex:0 0 130px"></div>
+    <p class="hint">标记「已售出」和定价默认只存在这台电脑的浏览器里。<br><b>改完必须点下面的「上传到仓库」</b>——只有这样，换台电脑、或者买家打开链接，才能看到你改的结果（含下面的联系人信息）。</p>
+    <div class="frow"><label>联系人</label><input id="fName" type="text" placeholder="会显示在页面顶部"><label>联系方式</label><input id="fContact" type="text" placeholder="微信号 / 邮箱"></div>
+    <div class="frow"><label>GitHub</label><input id="fRepo" type="text" placeholder="用户名/仓库名"><input id="fBranch" type="text" placeholder="分支，默认 main" style="flex:0 0 130px"></div>
     <div class="frow"><label>Token</label><input id="fToken" type="password" placeholder="细粒度 token（只勾这个仓库的 Contents: Read and write）">
       <button class="ghost" id="btnPull">从仓库拉取</button>
       <button class="ghost" id="btnPush">上传到仓库</button>
@@ -284,9 +284,17 @@ function b64enc(str){
   return btoa(bin);
 }
 function apiBase(){ return "https://api.github.com/repos/"+cfg.repo+"/contents/"+SYNC_PATH; }
+function fileProtoBlocked(){
+  if(location.protocol!=="file:") return false;
+  var m=(cfg.repo||"").split("/");
+  var site=(m.length===2&&m[0]&&m[1])?("https://"+m[0]+".github.io/"+m[1]+"/"):"线上页面";
+  say("无法联网：你现在是双击本地文件打开的（file://），浏览器会拦截这类请求。\n\n两种办法：\n① 打开线上页面再操作："+site+"\n② 或点「导出 JSON 备份」，再在 GitHub 网页上把 data/state.json 覆盖提交。");
+  return true;
+}
 
 async function pullRemote(silent){
   if(!cfg.repo || !cfg.token){ if(!silent) say("请先填写 用户名/仓库名 与 token。"); return; }
+  if(!silent && fileProtoBlocked()) return;
   try{
     var r = await fetch(apiBase()+"?ref="+cfg.branch, {headers:ghHeaders(), cache:"no-store"});
     if(r.status===404){ if(!silent) say("仓库里还没有 "+SYNC_PATH+"，点「上传到仓库」会创建它。"); return; }
@@ -297,26 +305,33 @@ async function pullRemote(silent){
     var m = 0;
     for(var k in (d.sold||{})){ if(state.sold[k]===undefined){ state.sold[k]=d.sold[k]; m++; } }
     for(var k2 in (d.price||{})){ if(state.price[k2]===undefined){ state.price[k2]=d.price[k2]; m++; } }
+    if(applySite(d.site, d.updated)) m++;
     if(!silent) say("已从仓库拉取，补充了 "+m+" 条记录。");
-    saveLocal(); render(); if(cur) openBook(cur);
+    saveLocal(); saveCfg(); syncCfgInputs(); render(); if(cur) openBook(cur);
   }catch(e){ if(!silent) say("拉取出错："+e.message); }
 }
 
 async function pushRemote(){
   if(!cfg.repo || !cfg.token){ say("请先填写 用户名/仓库名 与 token。"); return; }
+  if(fileProtoBlocked()) return;
   try{
     say("正在上传…");
     var sha = null;
     var g = await fetch(apiBase()+"?ref="+cfg.branch, {headers:ghHeaders(), cache:"no-store"});
     if(g.ok){ sha = (await g.json()).sha; }
     else if(g.status!==404){ say("查询失败：HTTP "+g.status); return; }
-    var payload = JSON.stringify({updated:new Date().toISOString(), sold:state.sold, price:state.price}, null, 1);
+    var payload = JSON.stringify({updated:new Date().toISOString(), sold:state.sold, price:state.price, site:{name:cfg.name, contact:cfg.contact}}, null, 1);
     var body = {message:"更新售书状态 "+new Date().toLocaleString("zh-CN"), content:b64enc(payload), branch:cfg.branch};
     if(sha) body.sha = sha;
     var p = await fetch(apiBase(), {method:"PUT", headers:Object.assign({"Content-Type":"application/json"},ghHeaders()), body:JSON.stringify(body)});
     if(p.ok){ say("已上传 ✔　GitHub Pages 通常 1 分钟内重新发布，别人刷新页面即可看到。"); }
     else{ var t = await p.text(); say("上传失败：HTTP "+p.status+"\n"+t.slice(0,240)); }
-  }catch(e){ say("上传出错："+e.message); }
+  }catch(e){
+    var extra = (String(e.message||"").indexOf("Failed to fetch")>=0)
+      ? "\n\n—— 浏览器压根没连上 api.github.com（请求没发出去，或被中途掐断）。常见三种原因：\n① 本页是双击本地文件打开的（file://），浏览器会拦截这类请求；\n② 代理或校园网把 api.github.com 拦了（把 api.github.com 也设为走代理试试）；\n③ 浏览器扩展拦截。\n兜底办法：点「导出 JSON 备份」，再到 GitHub 网页上覆盖提交 data/state.json。"
+      : "";
+    say("上传出错："+e.message+extra);
+  }
 }
 
 async function autoPull(){
@@ -327,8 +342,34 @@ async function autoPull(){
     var d = await r.json();
     for(var k in (d.sold||{})) if(state.sold[k]===undefined) state.sold[k]=d.sold[k];
     for(var k2 in (d.price||{})) if(state.price[k2]===undefined) state.price[k2]=d.price[k2];
-    saveLocal(); render();
+    applySite(d.site, d.updated);
+    saveLocal(); saveCfg(); syncCfgInputs(); render();
   }catch(e){}
+}
+
+/* ---------- 联系人信息同步 ----------
+   联系方式随 state.json 的 site 字段走：换电脑、访客都能看到。
+   用 updated 时间戳做版本号——只在远端比本地新时才覆盖，避免刚填还没上传就被拉取的旧值盖掉。 */
+var LS_SITE_TS = "books.site.siteTs.v1";
+function applySite(site, ts){
+  if(!site) return false;
+  var localTs = "";
+  try{ localTs = localStorage.getItem(LS_SITE_TS) || ""; }catch(e){}
+  if(ts && ts === localTs) return false;
+  var changed = false;
+  if(site.name!==undefined && site.name!==cfg.name){ cfg.name = site.name; changed = true; }
+  if(site.contact!==undefined && site.contact!==cfg.contact){ cfg.contact = site.contact; changed = true; }
+  if(ts){ try{ localStorage.setItem(LS_SITE_TS, ts); }catch(e){} }
+  return changed;
+}
+function syncCfgInputs(){
+  ["fName","fContact","fRepo","fBranch"].forEach(function(id){
+    var el = document.getElementById(id); if(!el) return;
+    if(document.activeElement===el) return;
+    var v = cfg[id.slice(1).toLowerCase()] || "";
+    if(id==="fBranch" && !v) v = "main";
+    el.value = v;
+  });
 }
 
 /* ---------- 渲染 ---------- */
@@ -394,7 +435,7 @@ function render(){
   var line = "";
   if(cfg.name) line += "联系人：<b>"+esc(cfg.name)+"</b>　";
   if(cfg.contact) line += "联系方式：<b>"+esc(cfg.contact)+"</b>";
-  document.getElementById("ownerLine").innerHTML = line || '（在「管理」里填上你的联系方式，会显示在这里）';
+  document.getElementById("ownerLine").innerHTML = line;
 }
 
 function buildChips(){
@@ -526,6 +567,17 @@ document.getElementById("btnReset").addEventListener("click", function(){
   if(!confirm("清空本机保存的「已售出」标记与定价？（不影响已上传到仓库的数据）")) return;
   state = {sold:{}, price:{}}; saveLocal(); render(); say("已清空本机标记。");
 });
+
+/* ---------- 管理入口（默认隐藏） ----------
+   只有地址栏带 #admin 时，右上角的「管理」按钮才会出现。
+   普通访客打开页面，看不到任何管理痕迹。 */
+function applyAdminGate(){
+  var on = /(^|[#&])admin\b/i.test(location.hash);
+  document.getElementById("btnAdmin").style.display = on ? "" : "none";
+  if(!on) document.getElementById("admin").classList.remove("on");
+}
+window.addEventListener("hashchange", applyAdminGate);
+applyAdminGate();
 
 /* ---------- 启动 ---------- */
 loadLocal();
